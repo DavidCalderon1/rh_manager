@@ -1,0 +1,10 @@
+{
+    "name": "RH Manager",
+    "domain": "rh_manager",
+    "author": "David Calderon",
+    "author_uri": "https://github.com/DavidCalderon1",
+    "description": "APIs for manage race in RotorHazard.",
+    "version": "1.0.0",
+    "required_rhapi_version": "1.4",
+    "documentation_uri": "https://github.com/DavidCalderon1/rh_manager"
+}
