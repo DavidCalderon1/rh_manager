@@ -1,0 +1,270 @@
+====================================================================
+ frmCreateHeats -- agregar opcion "clase existente"
+====================================================================
+
+Este NO es un archivo para importar. Es la actualizacion que hay que
+aplicar a mano al formulario frmCreateHeats que ya existe en tu Excel,
+porque el formulario en si (los controles, su posicion) vive en un
+archivo binario (.frx) que no puedo generar yo de forma confiable fuera
+de Excel. El CODIGO de abajo si es texto plano, ese lo puedes pegar
+directo.
+
+--------------------------------------------------------------------
+PASO 1: agregar 2 controles nuevos al formulario (vista de diseno)
+--------------------------------------------------------------------
+
+1. Alt+F11 -> doble clic en "frmCreateHeats" en el arbol de proyecto
+   para abrir la vista de DISENO (no la de codigo).
+2. Barra de herramientas de controles (si no la ves: Ver > Cajas de
+   Herramientas): agrega un CheckBox y ponlo cerca de ComboBoxStages.
+     - (Name): CheckBoxExistingClass
+     - Caption: "Agregar a clase existente"
+3. Agrega un ComboBox justo debajo o al lado del checkbox:
+     - (Name): ComboBoxExistingClass
+     - ColumnCount: 2
+     - Enabled: False   (arranca deshabilitado, se activa solo si
+       marcas el checkbox)
+
+--------------------------------------------------------------------
+PASO 2: pegar este codigo en el modulo de codigo del formulario
+--------------------------------------------------------------------
+
+Doble clic en el CheckBox nuevo (o clic derecho en frmCreateHeats >
+"View Code") para abrir el editor de codigo del formulario, y:
+
+(a) REEMPLAZA tu "CommandButtonGenerate_Click" completo por este:
+
+Private Sub CommandButtonGenerate_Click()
+    Dim dict As New Dictionary
+    Dim frequencies As String, pilots As String
+    Dim i As Integer
+
+    If CheckBoxExistingClass.Value = True Then
+        If ComboBoxExistingClass.ListIndex = -1 Then
+            MsgBox "Selecciona una clase existente.", vbExclamation
+            Exit Sub
+        End If
+    End If
+
+    With ListBoxPilots
+        For i = 0 To .ListCount - 1
+            If .Selected(i) Then
+                pilots = pilots & .List(i) & ","
+            End If
+        Next i
+    End With
+    If Len(pilots) = 0 Then
+        MsgBox "Selecciona al menos un piloto.", vbExclamation
+        Exit Sub
+    End If
+    pilots = Left(pilots, Len(pilots) - 1)
+
+    ' -- SIN CONEXION: nada de esto pasa por RotorHazard -- se arma el
+    ' shuffle localmente (OfflineData.ShuffleHeatsLocal, el mismo algoritmo
+    ' que generate_heats_logic en el backend, portado a VBA) y se dibuja
+    ' directo. Las frecuencias no se piden porque sin hardware conectado no
+    ' representan nada real -- cada nodo queda con una etiqueta generica
+    ' ("N1", "N2"...). --
+    If ThisWorkbook.WorkOffline() = True Then
+        Dim existingClassId As Long
+        Dim stageName As String, winCond As String
+        Dim roundsPerGroup As Long, numGroups As Long, pilotsPerHeat As Long
+        Dim pilotIdParts() As String
+        Dim pilotCallsigns As New Collection
+
+        If CheckBoxExistingClass.Value = True Then
+            existingClassId = CLng(ComboBoxExistingClass.Value)
+        Else
+            If Trim(ComboBoxStages.Value) = "" Or Trim(ComboBoxWinConditions.Value) = "" Then
+                MsgBox "Completa el nombre de la clase y el metodo de posiciones.", vbExclamation
+                Exit Sub
+            End If
+            existingClassId = 0
+            stageName = ComboBoxStages.Value
+            winCond = ComboBoxWinConditions.Value
+            roundsPerGroup = CLng(ComboBoxRounds.Value)
+        End If
+        numGroups = CLng(ComboBoxGroups.Value)
+        pilotsPerHeat = CLng(ComboBoxPilots.Value)
+
+        pilotIdParts = Split(pilots, ",")
+        For i = LBound(pilotIdParts) To UBound(pilotIdParts)
+            pilotCallsigns.Add GetCallsignForPilot(CLng(Trim(pilotIdParts(i))))
+        Next i
+
+        GenerateHeatsLocal existingClassId, stageName, winCond, roundsPerGroup, numGroups, pilotsPerHeat, pilotCallsigns
+        Unload Me
+        Exit Sub
+    End If
+
+    ' -- CON CONEXION: flujo de siempre, sin cambios --
+    Set http = CreateObject("MSXML2.XMLHTTP")
+    url = ThisWorkbook.Sheets("Config").Range("H2").Value & "/api/rhm/heats/generate?t=" & Format(Now, "hhmmss")
+
+    If CheckBoxExistingClass.Value = True Then
+        dict.Add "class_id", ComboBoxExistingClass.Value
+    Else
+        dict.Add "stage", ComboBoxStages.Value
+        dict.Add "format", ComboBoxFormats.Value
+        dict.Add "win_condition", ComboBoxWinConditions.Value
+        dict.Add "rounds_per_group", ComboBoxRounds.Value
+    End If
+
+    dict.Add "num_groups", ComboBoxGroups.Value
+    dict.Add "pilots_per_heat", ComboBoxPilots.Value
+    With ListBoxFrequencies
+        For i = 0 To .ListCount - 1
+            If .Selected(i) Then
+                frequencies = frequencies & .List(i) & ","
+            End If
+        Next i
+    End With
+    If Len(frequencies) = 0 Then
+        MsgBox "Selecciona al menos una frecuencia.", vbExclamation
+        Exit Sub
+    End If
+    frequencies = Left(frequencies, Len(frequencies) - 1)
+    dict.Add "frequencies", frequencies
+    dict.Add "pilots", pilots
+    dict.Add "delete_everything", IIf(OptionButtonDeleteYes.Value, True, False)
+    jsonBody = JsonConverter.ConvertToJson(dict)
+
+    On Error GoTo ErrorSend
+    http.Open "POST", url, False
+    http.setRequestHeader "Content-Type", "application/json"
+    http.Send jsonBody
+
+    If http.Status = 200 Or http.Status = 201 Then
+        ThisWorkbook.Sheets("Carrera").Range("G1").Value = http.responseText
+        Dim respJson As Object, k As Variant, grpObj As Object
+        Set respJson = JsonConverter.ParseJson(http.responseText)
+        If OptionButtonDeleteYes.Value Then
+            ' everything was wiped server-side -- start the sheet fresh with
+            ' just the new class instead of leaving stale blocks around
+            RenderRaceTablesFromData respJson("groups")
+        Else
+            ' surgical: redraw only the class that was just created/updated,
+            ' leave every other class's table exactly as it was
+            For Each k In respJson("groups").keys
+                Set grpObj = respJson("groups")(k)
+                RenderSingleClassInPlace grpObj
+            Next k
+        End If
+        Unload Me
+    Else
+        MsgBox "Error del servidor (" & http.Status & "): " & http.responseText, vbCritical
+    End If
+
+    Exit Sub
+ErrorSend:
+    MsgBox "No se pudo establecer conexion con Rotorhazard." & Err.Description, vbCritical
+End Sub
+
+(b) AGREGA este nuevo evento (no existia antes) -- habilita/deshabilita
+    los campos segun el checkbox:
+
+Private Sub CheckBoxExistingClass_Click()
+    Dim useExisting As Boolean
+    useExisting = CheckBoxExistingClass.Value
+
+    ComboBoxExistingClass.Enabled = useExisting
+    ComboBoxStages.Enabled = Not useExisting
+    ComboBoxFormats.Enabled = Not useExisting
+    ComboBoxWinConditions.Enabled = Not useExisting
+    ComboBoxRounds.Enabled = Not useExisting
+End Sub
+
+(c) AGREGA este nuevo Sub (no existia antes) -- trae la lista de clases
+    existentes: del servidor si hay conexion, o de las que ya estan
+    dibujadas en la hoja "Carrera" si no la hay (GetLocalClassList, en
+    OfflineData.bas, lee la hoja oculta RaceMetaGroups):
+
+Private Sub LoadExistingClasses()
+    Dim http2 As Object, url2 As String
+    Dim json2 As Object, c As Object
+
+    ComboBoxExistingClass.Clear
+    ComboBoxExistingClass.ColumnCount = 2
+    ComboBoxExistingClass.BoundColumn = 1
+    ComboBoxExistingClass.ColumnWidths = "0 pt;120 pt"
+
+    If ThisWorkbook.WorkOffline() Then
+        Dim localClasses As Collection, item As Object
+        Set localClasses = GetLocalClassList()
+        For Each item In localClasses
+            ComboBoxExistingClass.AddItem item("id")
+            ComboBoxExistingClass.List(ComboBoxExistingClass.ListCount - 1, 1) = item("name")
+        Next item
+        Exit Sub
+    End If
+
+    On Error GoTo ErrLoad
+    Set http2 = CreateObject("MSXML2.XMLHTTP")
+    url2 = ThisWorkbook.Sheets("Config").Range("H2").Value & "/api/rhm/raceclasses?t=" & Format(Now, "hhmmss")
+    http2.Open "GET", url2, False
+    http2.setRequestHeader "Cache-Control", "no-cache"
+    http2.Send
+
+    If http2.Status <> 200 And http2.Status <> 201 Then Exit Sub
+
+    Set json2 = JsonConverter.ParseJson(http2.responseText)
+    For Each c In json2("classes")
+        ComboBoxExistingClass.AddItem c("id")
+        ComboBoxExistingClass.List(ComboBoxExistingClass.ListCount - 1, 1) = c("name")
+    Next c
+    Exit Sub
+
+ErrLoad:
+    ' silencioso -- si falla, el checkbox de clase existente simplemente
+    ' queda sin opciones, no bloquea el resto del formulario
+End Sub
+
+(c-2) AGREGA tambien este Sub -- llena ListBoxPilots desde Config!A:C
+    cuando no hay conexion (ComboBoxNewPilot/ListBoxPilots ya esperan id en
+    la columna 0 y texto visible en la columna 1, igual que la version que
+    llenas hoy desde la API):
+
+Private Sub LoadPilotsOffline()
+    Dim pilotsColl As Collection, p As Object
+    Set pilotsColl = GetOfflinePilots()
+    ListBoxPilots.Clear
+    ListBoxPilots.ColumnCount = 2
+    For Each p In pilotsColl
+        ListBoxPilots.AddItem p("id")
+        ListBoxPilots.List(ListBoxPilots.ListCount - 1, 1) = p("callsign")
+    Next p
+End Sub
+
+(d) En tu "UserForm_Initialize" YA EXISTENTE, agrega estas DOS lineas
+    al final (antes del "End Sub") -- la segunda es nueva, para que
+    ListBoxPilots tenga con que trabajar sin conexion (lo que ya tenias ahi
+    para llenarlo desde la API sigue igual, esto solo se SUMA):
+
+    LoadExistingClasses
+    If ThisWorkbook.WorkOffline() Then LoadPilotsOffline
+
+--------------------------------------------------------------------
+PASO 3: prueba
+--------------------------------------------------------------------
+
+1. Abre "Generar Heats". Confirma que aparece el nuevo checkbox
+   "Agregar a clase existente" y, si le das clic, el combo de al lado
+   se llena con las clases reales que ya existen en RotorHazard.
+2. Sin marcar el checkbox: genera heats como siempre -- confirma que
+   TODOS los grupos (G1, G2, G3...) quedan en UNA sola clase (antes
+   quedaba una clase por grupo).
+3. Marca el checkbox, elige una clase existente, genera de nuevo con
+   menos grupos (p.ej. 1) -- confirma que se agregan como "G4" (o el
+   numero que siga) DENTRO de esa misma clase, sin tocar los grupos que
+   ya tenia.
+4. Pon `Config!E14` en modo sin conexion. Abre "Generar Heats" -- confirma
+   que ListBoxPilots SI tiene pilotos para elegir (viene de Config!A:C, no
+   de la API) y que ListBoxFrequencies puede quedar vacio sin problema (no
+   se usa sin conexion).
+5. Sin conexion, genera una clase nueva -- confirma que arma la tabla con
+   los pilotos mezclados localmente, sin ningun error de red, y que la
+   columna Fr muestra etiquetas genericas ("N1", "N2"...).
+6. Sin conexion, marca "Agregar a clase existente" -- confirma que el
+   combo muestra las clases que ya estan en la hoja "Carrera" (incluida la
+   que acabas de crear sin conexion), y que agregar heats a ella funciona
+   igual que en el paso 3, sin tocar lo que ya tenia.

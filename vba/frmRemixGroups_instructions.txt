@@ -1,0 +1,168 @@
+====================================================================
+ frmRemixGroups -- formulario para elegir que grupos remixar
+====================================================================
+
+Reemplaza el InputBox donde escribias los numeros de los grupos a remixar
+(separados por coma) por un formulario real con una lista de seleccion
+multiple. Como no puedo generar el .frm binario yo mismo, aqui tienes las
+instrucciones para armarlo a mano (10 minutos) + el codigo completo para
+pegar, que si es texto plano y funciona garantizado.
+
+--------------------------------------------------------------------
+PASO 1: crear el formulario
+--------------------------------------------------------------------
+
+1. Alt+F11 -> clic derecho en el proyecto > Insert > UserForm.
+2. En la ventana de Propiedades, cambia (Name) a: frmRemixGroups
+   Cambia Caption a: "Remix: elegir grupos"
+3. Agrega estos controles desde la caja de herramientas (posicion no
+   importa mucho, acomodalos como quieras):
+
+   | Control       | (Name)                | Notas                                          |
+   |---------------|------------------------|-------------------------------------------------|
+   | Label         | (el que sea)           | Texto: "Elige los grupos a remixar:"            |
+   | ListBox       | ListBoxGroups          | ColumnCount = 2 (en propiedades)                |
+   |               |                        | MultiSelect = 1 - fmMultiSelectMulti            |
+   | CommandButton | CommandButtonSelectAll | Caption: "Seleccionar todos"                    |
+   | CommandButton | CommandButtonRemix     | Caption: "Remixar"                              |
+   | CommandButton | CommandButtonCancel    | Caption: "Cancelar"                             |
+
+   MultiSelect = 1 - fmMultiSelectMulti hace que cada clic en una fila la
+   prenda/apague sin necesitar Ctrl o Shift -- mas facil para el usuario
+   final que el modo "extendido" tipo explorador de archivos.
+
+--------------------------------------------------------------------
+PASO 2: pegar el codigo (doble clic en el formulario para abrir su
+modulo de codigo, o clic derecho > View Code)
+--------------------------------------------------------------------
+
+Option Explicit
+
+Private mClassId As Long
+Private mGroupIds() As Long   ' group_id de cada fila de ListBoxGroups, en el mismo orden
+
+Public Sub LoadClass(classId As Long)
+    Dim http As Object, url As String
+    Dim json As Object, groupsArr As Object, g As Object
+    Dim i As Long
+
+    mClassId = classId
+    Me.Caption = "Remix: elegir grupos (clase " & classId & ")"
+
+    If ThisWorkbook.WorkOffline() Then
+        ' sin API -- los grupos salen de los nombres "G<n>" de los heats
+        ' que ya estan en la hoja (GetLocalClassGroups, en OfflineData.bas)
+        Set groupsArr = GetLocalClassGroups(classId)
+        ListBoxGroups.Clear
+        ListBoxGroups.ColumnCount = 2
+        ReDim mGroupIds(0 To groupsArr.count - 1)
+        For i = 1 To groupsArr.count
+            Set g = groupsArr(i)
+            ListBoxGroups.AddItem g("label")
+            ListBoxGroups.List(i - 1, 1) = g("heats").count & " heats"
+            mGroupIds(i - 1) = CLng(g("group_id"))
+        Next i
+        Exit Sub
+    End If
+
+    On Error GoTo ErrConexion
+    Set http = CreateObject("MSXML2.XMLHTTP")
+    url = ThisWorkbook.Sheets("Config").Range("H2").Value & "/api/rhm/raceclass/" & classId & "/groups?t=" & Format(Now, "hhmmss")
+    http.Open "GET", url, False
+    http.setRequestHeader "Cache-Control", "no-cache"
+    http.Send
+
+    If http.Status <> 200 And http.Status <> 201 Then
+        MsgBox "No se pudo cargar los grupos (" & http.Status & ")", vbExclamation
+        Exit Sub
+    End If
+
+    Set json = JsonConverter.ParseJson(http.responseText)
+    Set groupsArr = json("groups")
+
+    ListBoxGroups.Clear
+    ListBoxGroups.ColumnCount = 2
+    ReDim mGroupIds(0 To groupsArr.count - 1)
+    For i = 1 To groupsArr.count
+        Set g = groupsArr(i)
+        ListBoxGroups.AddItem g("label")
+        ListBoxGroups.List(i - 1, 1) = g("heats").count & " heats"
+        mGroupIds(i - 1) = CLng(g("group_id"))
+    Next i
+    Exit Sub
+
+ErrConexion:
+    MsgBox "No se pudo conectar con RotorHazard.", vbCritical
+End Sub
+
+Private Sub CommandButtonSelectAll_Click()
+    Dim i As Integer
+    For i = 0 To ListBoxGroups.ListCount - 1
+        ListBoxGroups.Selected(i) = True
+    Next i
+End Sub
+
+Private Sub CommandButtonRemix_Click()
+    Dim i As Integer
+    Dim csv As String
+
+    csv = ""
+    For i = 0 To ListBoxGroups.ListCount - 1
+        If ListBoxGroups.Selected(i) Then
+            If csv <> "" Then csv = csv & ","
+            csv = csv & mGroupIds(i)
+        End If
+    Next i
+
+    If csv = "" Then
+        MsgBox "Selecciona al menos un grupo.", vbExclamation
+        Exit Sub
+    End If
+
+    If PerformRemix(mClassId, csv) Then
+        Unload Me
+    End If
+End Sub
+
+Private Sub CommandButtonCancel_Click()
+    Unload Me
+End Sub
+
+--------------------------------------------------------------------
+PASO 3: conectar el boton MX de cada grupo a este formulario
+--------------------------------------------------------------------
+
+Esto ya lo hice yo en RenderRaceTables.bas -- RemixGroupAndRedraw ahora
+consulta los grupos de la clase y:
+  - si hay UN solo grupo, remixa directo (no tiene sentido preguntar);
+  - si hay VARIOS grupos, abre frmRemixGroups en vez del InputBox viejo.
+La logica de confirmar + mandar el remix al servidor + redibujar la clase
+quedo en una funcion compartida (PerformRemix), que tanto el camino directo
+como el boton "Remixar" de este formulario usan -- solo tienes que
+reimportar RenderRaceTables.bas (que ya trae ese cambio) despues de crear
+este formulario.
+
+--------------------------------------------------------------------
+PASO 4: prueba
+--------------------------------------------------------------------
+
+1. En una clase con UN solo grupo, dale MX -- confirma que remixa directo
+   (sin mostrar ningun formulario ni lista), igual que antes.
+2. En una clase con 2+ grupos, dale MX -- confirma que se abre
+   frmRemixGroups con la lista de grupos y cuantos heats tiene cada uno.
+3. Selecciona UN grupo (un clic, sin Ctrl/Shift) y dale "Remixar" --
+   confirma que solo ese grupo cambia de pilotos, y que el formulario se
+   cierra solo.
+4. Abre el formulario de nuevo, dale "Seleccionar todos" y "Remixar" --
+   confirma que TODOS los grupos de la clase se remixan.
+5. Abre el formulario, no selecciones nada, dale "Remixar" -- confirma que
+   sale el aviso "Selecciona al menos un grupo" y el formulario NO se
+   cierra.
+6. Abre el formulario, selecciona un grupo, dale "Remixar", y en el
+   MsgBox de confirmacion responde que No -- confirma que el formulario
+   sigue abierto (no se cerro) y no se hizo ningun cambio.
+7. Dale "Cancelar" -- confirma que el formulario se cierra sin remixar
+   nada.
+8. Pon `Config!E14` en modo sin conexion y repite los pasos 1-3 -- todo
+   debe funcionar igual, sin ningun error de red (los grupos salen de los
+   nombres de heat que ya estan en la hoja, no de la API).

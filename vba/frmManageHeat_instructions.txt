@@ -1,0 +1,259 @@
+====================================================================
+ frmManageHeat -- formulario nuevo para editar pilotos de un heat
+====================================================================
+
+Reemplaza la cadena de InputBox de "Editar Piloto Heat" por un formulario
+real con listas. Como no puedo generar el .frm binario yo mismo, aqui
+tienes las instrucciones para armarlo a mano (10 minutos) + el codigo
+completo para pegar, que si es texto plano y funciona garantizado.
+
+--------------------------------------------------------------------
+PASO 1: crear el formulario
+--------------------------------------------------------------------
+
+1. Alt+F11 -> clic derecho en el proyecto > Insert > UserForm.
+2. En la ventana de Propiedades, cambia (Name) a: frmManageHeat
+   Cambia Caption a: "Editar Heat"
+3. Agrega estos controles desde la caja de herramientas (posicion no
+   importa mucho, acomodalos como quieras):
+
+   | Control    | (Name)              | Notas                                    |
+   |------------|---------------------|-------------------------------------------|
+   | Label      | (el que sea)        | Texto: "Slots del heat:"                  |
+   | ListBox    | ListBoxSlots        | ColumnCount = 2 (en propiedades)          |
+   | Label      | (el que sea)        | Texto: "Nuevo piloto para el slot:"       |
+   | ComboBox   | ComboBoxNewPilot    | ColumnCount = 2, Style = fmStyleDropDownList |
+   | CommandButton | CommandButtonSave    | Caption: "Guardar"                     |
+   | CommandButton | CommandButtonCancel  | Caption: "Cancelar"                    |
+
+--------------------------------------------------------------------
+PASO 2: pegar el codigo (doble clic en el formulario para abrir su
+modulo de codigo, o clic derecho > View Code)
+--------------------------------------------------------------------
+
+Option Explicit
+
+Private mHeatId As Long
+Private mSlotIds() As Long      ' slot_id de cada fila de ListBoxSlots (online), mismo orden
+Private mNodeIndexes() As Long  ' node_index de cada fila de ListBoxSlots (offline), mismo orden
+
+Public Sub LoadHeat(heatId As Long)
+    Dim http As Object, url As String
+    Dim json As Object, heatData As Object
+    Dim nd As Object
+    Dim i As Long
+
+    mHeatId = heatId
+    Me.Caption = "Editar Heat " & heatId
+
+    If ThisWorkbook.WorkOffline() Then
+        ' no hay API -- se cosecha la clase de este heat directo de la hoja
+        ' (HarvestClassFromSheet, en OfflineData.bas). Solo salen los slots
+        ' YA ocupados: un slot que nunca tuvo piloto no se dibuja ni se
+        ' registra sin conexion, asi que no aparece aqui para elegirlo por
+        ' primera vez (usa "Generar Heats" o el remix para eso).
+        Dim classId As Long, classDict As Object, heatDict As Object
+        classId = FindClassIdForHeatLocal(heatId)
+        If classId = 0 Then
+            MsgBox "No se encontro la clase de este heat.", vbExclamation
+            Exit Sub
+        End If
+        Set classDict = HarvestClassFromSheet(classId)
+        If classDict Is Nothing Then Exit Sub
+        If Not classDict("heats").Exists(CStr(heatId)) Then Exit Sub
+        Set heatDict = classDict("heats")(CStr(heatId))
+        Me.Caption = "Editar: " & heatDict("display_name")
+
+        ListBoxSlots.Clear
+        ListBoxSlots.ColumnCount = 2
+        ReDim mSlotIds(0 To heatDict("nodes").count - 1)
+        ReDim mNodeIndexes(0 To heatDict("nodes").count - 1)
+        i = 0
+        For Each nd In heatDict("nodes")
+            ListBoxSlots.AddItem "Node " & nd("node_index")
+            If IsNull(nd("pilot_id")) Then
+                ListBoxSlots.List(i, 1) = "(vacio)"
+            Else
+                ListBoxSlots.List(i, 1) = GetCallsignLocal(CLng(nd("pilot_id")))
+            End If
+            mSlotIds(i) = 0
+            mNodeIndexes(i) = nd("node_index")
+            i = i + 1
+        Next nd
+
+        LoadPilotChoices
+        Exit Sub
+    End If
+
+    On Error GoTo ErrConexion
+    Set http = CreateObject("MSXML2.XMLHTTP")
+    url = ThisWorkbook.Sheets("Config").Range("H2").Value & "/api/rhm/heat/" & heatId & "/results?t=" & Format(Now, "hhmmss")
+    http.Open "GET", url, False
+    http.setRequestHeader "Cache-Control", "no-cache"
+    http.Send
+
+    If http.Status <> 200 And http.Status <> 201 Then
+        MsgBox "No se pudo cargar el heat (" & http.Status & ")", vbExclamation
+        Exit Sub
+    End If
+
+    Set json = JsonConverter.ParseJson(http.responseText)
+    Set heatData = json("heat")
+    Me.Caption = "Editar: " & heatData("display_name")
+
+    ListBoxSlots.Clear
+    ListBoxSlots.ColumnCount = 2
+    ReDim mSlotIds(0 To heatData("nodes").Count - 1)
+    i = 0
+    For Each nd In heatData("nodes")
+        ListBoxSlots.AddItem "Node " & nd("node_index")
+        If IsNull(nd("pilot_id")) Then
+            ListBoxSlots.List(i, 1) = "(vacio)"
+        Else
+            ListBoxSlots.List(i, 1) = GetCallsignLocal(CLng(nd("pilot_id")))
+        End If
+        mSlotIds(i) = nd("slot_id")
+        i = i + 1
+    Next nd
+
+    LoadPilotChoices
+    Exit Sub
+
+ErrConexion:
+    MsgBox "No se pudo conectar con RotorHazard.", vbCritical
+End Sub
+
+Private Sub LoadPilotChoices()
+    Dim http As Object, url As String
+    Dim json As Object, p As Object
+
+    ComboBoxNewPilot.Clear
+    ComboBoxNewPilot.ColumnCount = 2
+    ComboBoxNewPilot.AddItem ""
+    ComboBoxNewPilot.List(0, 1) = "(quitar piloto)"
+
+    If ThisWorkbook.WorkOffline() Then
+        Dim pilotsColl As Collection
+        Set pilotsColl = GetOfflinePilots()
+        For Each p In pilotsColl
+            ComboBoxNewPilot.AddItem p("id")
+            ComboBoxNewPilot.List(ComboBoxNewPilot.ListCount - 1, 1) = p("callsign")
+        Next p
+        Exit Sub
+    End If
+
+    On Error Resume Next
+    Set http = CreateObject("MSXML2.XMLHTTP")
+    url = ThisWorkbook.Sheets("Config").Range("H2").Value & "/api/rhm/pilots?t=" & Format(Now, "hhmmss")
+    http.Open "GET", url, False
+    http.Send
+    If http.Status <> 200 And http.Status <> 201 Then Exit Sub
+
+    Set json = JsonConverter.ParseJson(http.responseText)
+    For Each p In json
+        ComboBoxNewPilot.AddItem p("id")
+        ComboBoxNewPilot.List(ComboBoxNewPilot.ListCount - 1, 1) = p("callsign")
+    Next p
+End Sub
+
+Private Function GetCallsignLocal(pid As Long) As String
+    Dim ws As Worksheet, lr As Long, i As Long
+    Set ws = ThisWorkbook.Sheets("Config")
+    lr = ws.Cells(ws.Rows.count, 1).End(xlUp).row
+    For i = 2 To lr
+        If CLng(Val(CStr(ws.Cells(i, 1).Value))) = pid Then
+            GetCallsignLocal = Trim(CStr(ws.Cells(i, 3).Value))
+            Exit Function
+        End If
+    Next i
+    GetCallsignLocal = "Pilot#" & pid
+End Function
+
+Private Sub CommandButtonSave_Click()
+    Dim http As Object, url As String
+    Dim payload As String
+    Dim slotIdx As Integer
+    Dim newPilotVal As String
+
+    If ListBoxSlots.ListIndex = -1 Then
+        MsgBox "Selecciona un slot de la lista.", vbExclamation
+        Exit Sub
+    End If
+    If ComboBoxNewPilot.ListIndex = -1 Then
+        MsgBox "Selecciona un piloto (o '(quitar piloto)').", vbExclamation
+        Exit Sub
+    End If
+
+    slotIdx = ListBoxSlots.ListIndex
+    newPilotVal = ComboBoxNewPilot.Value
+
+    If ThisWorkbook.WorkOffline() Then
+        Dim newCallsign As String
+        If newPilotVal = "" Then
+            newCallsign = ""
+        Else
+            newCallsign = GetCallsignForPilot(CLng(newPilotVal))
+        End If
+        SetPilotForNodeOffline mHeatId, mNodeIndexes(slotIdx), newCallsign
+        RefreshHeatCells mHeatId    ' recomputes standings and redraws this class
+        LoadHeat mHeatId            ' refresh the list so it shows the new pilot
+        MsgBox "Guardado.", vbInformation
+        Exit Sub
+    End If
+
+    If newPilotVal = "" Then
+        payload = "[{""slot_id"":" & mSlotIds(slotIdx) & ",""pilot"":null}]"
+    Else
+        payload = "[{""slot_id"":" & mSlotIds(slotIdx) & ",""pilot"":" & CLng(newPilotVal) & "}]"
+    End If
+
+    On Error GoTo ErrConexion
+    Set http = CreateObject("MSXML2.XMLHTTP")
+    url = ThisWorkbook.Sheets("Config").Range("H2").Value & "/api/rhm/heat/" & mHeatId
+    http.Open "POST", url, False
+    http.setRequestHeader "Content-Type", "application/json"
+    http.Send payload
+
+    If http.Status = 200 Or http.Status = 201 Then
+        RefreshHeatCells mHeatId    ' updates the cells on "Carrera" without closing this form
+        LoadHeat mHeatId            ' refresh the list so it shows the new pilot
+        MsgBox "Guardado.", vbInformation
+    Else
+        MsgBox "Error del servidor (" & http.Status & "): " & http.responseText, vbCritical
+    End If
+    Exit Sub
+
+ErrConexion:
+    MsgBox "No se pudo establecer conexion con RotorHazard.", vbCritical
+End Sub
+
+Private Sub CommandButtonCancel_Click()
+    Unload Me
+End Sub
+
+--------------------------------------------------------------------
+PASO 3: conectar el boton "E" a este formulario
+--------------------------------------------------------------------
+
+Esto ya lo hice yo en ManageRace.bas (ver ese archivo) -- el boton "E" de
+cada heat ya abre frmManageHeat en vez de encadenar InputBox. Solo tienes
+que reimportar ManageRace.bas despues de crear el formulario. (El boton
+fijo "Editar Piloto Heat" de la columna A que existia en una version
+anterior de este mismo README se elimino -- el "E" por heat ya cubre lo
+mismo sin tener que escribir el id a mano.)
+
+--------------------------------------------------------------------
+PASO 4: prueba
+--------------------------------------------------------------------
+
+1. Dale clic al boton "E" de un heat -- confirma que abre el formulario
+   ya cargado con los slots y pilotos actuales de ESE heat.
+2. Selecciona un slot, elige un piloto nuevo (o "(quitar piloto)"),
+   dale "Guardar" -- confirma que la lista se refresca mostrando el
+   cambio, Y que la celda correspondiente en la hoja "Carrera" tambien
+   se actualizo sola (sin cerrar el formulario).
+3. Pon `Config!E14` en modo sin conexion. Dale clic al boton "E" de un
+   heat -- confirma que ComboBoxNewPilot SI tiene pilotos (de Config!A:C).
+4. Sin conexion, cambia el piloto de un slot y dale "Guardar" -- confirma
+   que la celda en "Carrera" cambia y que "Posiciones" se recalcula, todo
+   sin ningun error de red.
